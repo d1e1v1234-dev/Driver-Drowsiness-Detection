@@ -4,7 +4,6 @@ __pycache__/
 venv/
 ml_env/
 *.h5
-*.keras
 Dataset/
 dd.py
 .vscode/
