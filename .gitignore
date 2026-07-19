@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+ml_env/
+*.h5
+*.keras
+Dataset/
+dd.py
+.vscode/
