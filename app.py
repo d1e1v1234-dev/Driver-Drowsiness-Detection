@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
+import time
 
 st.set_page_config(page_title="Driver Drowsiness Detection", layout="centered")
 st.title("🚗 Driver Drowsiness Detection")
@@ -13,7 +14,7 @@ st.write("Real-time eye and yawn monitoring using CNN models (MobileNetV3).")
 # CONFIGURATION
 # =========================================================
 IMG_SIZE = (128, 128)
-EYE_CLOSED_THRESHOLD = 3
+EYE_CLOSED_THRESHOLD = 5
 YAWN_THRESHOLD = 0.5
 
 EYE_MODEL_PATH = "models/eye_model_fixed.keras"
@@ -58,85 +59,91 @@ RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.goog
 class DrowsinessProcessor(VideoProcessorBase):
     def __init__(self):
         self.closed_eye_counter = 0
+        self.frame_count = 0
+        self.predict_every_n = 3
+        self.last_eye_label = "Unknown"
+        self.last_yawn_label = "Unknown"
+        self.drowsy_start_time = None
+        self.is_drowsy_long = False
+        
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
-        )
+        self.frame_count += 1
+        run_prediction = (self.frame_count % self.predict_every_n == 0)
 
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
         status_text = "No face detected"
         status_color = (200, 200, 200)
 
         for (x, y, w, h) in faces:
             cv2.rectangle(img, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            face_gray = gray[y:y+h, x:x+w]
+            face_color = img[y:y+h, x:x+w]
 
-            face_gray = gray[y:y + h, x:x + w]
-            face_color = img[y:y + h, x:x + w]
+            if run_prediction:
+                eyes = eye_cascade.detectMultiScale(face_gray, minSize=(20, 20))
+                if len(eyes) > 0:
+                    ex, ey, ew, eh = eyes[0]
+                    eye_crop = face_color[ey:ey+eh, ex:ex+ew]
+                    if eye_crop.size > 0:
+                        eye_arr = preprocess_image(eye_crop)
+                        eye_pred = model_eye.predict(eye_arr, verbose=0)[0][0]
+                        self.last_eye_label = eye_class_names[int(eye_pred > 0.5)]
+                        cv2.rectangle(img, (x+ex, y+ey), (x+ex+ew, y+ey+eh), (0,255,0), 2)
+                        if self.last_eye_label == "Closed_Eyes":
+                            self.closed_eye_counter += 1
+                        else:
+                            self.closed_eye_counter = 0
 
-            eye_label = "Unknown"
-            yawn_label = "Unknown"
+                mouth_y_start = int(h * 0.6)
+                mouth_crop = face_color[mouth_y_start:h, 0:w]
+                if mouth_crop.size > 0:
+                    mouth_arr = preprocess_image(mouth_crop)
+                    yawn_pred = model_yawn.predict(mouth_arr, verbose=0)[0][0]
+                    self.last_yawn_label = yawn_class_names[int(yawn_pred > YAWN_THRESHOLD)]
+                    cv2.rectangle(img, (x, y+mouth_y_start), (x+w, y+h), (255,0,255), 2)
 
-            # --- Eye detection ---
-            eyes = eye_cascade.detectMultiScale(
-                face_gray, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20)
-            )
+            eye_label = self.last_eye_label
+            yawn_label = self.last_yawn_label
 
-            if len(eyes) > 0:
-                ex, ey, ew, eh = eyes[0]
-                eye_crop = face_color[ey:ey + eh, ex:ex + ew]
+            is_drowsy_now = self.closed_eye_counter >= EYE_CLOSED_THRESHOLD or yawn_label == "Yawn"
 
-                if eye_crop.size > 0:
-                    eye_arr = preprocess_image(eye_crop)
-                    eye_pred = model_eye.predict(eye_arr, verbose=0)[0][0]
-                    eye_index = int(eye_pred > 0.5)
-                    eye_label = eye_class_names[eye_index]
-
-                    cv2.rectangle(img, (x + ex, y + ey), (x + ex + ew, y + ey + eh), (0, 255, 0), 2)
-
-                    if eye_label == "Closed_Eyes":
-                        self.closed_eye_counter += 1
-                    else:
-                        self.closed_eye_counter = 0
-
-            # --- Yawn detection ---
-            mouth_y_start = int(h * 0.60)
-            mouth_crop = face_color[mouth_y_start:h, 0:w]
-
-            if mouth_crop.size > 0:
-                mouth_arr = preprocess_image(mouth_crop)
-                yawn_pred = model_yawn.predict(mouth_arr, verbose=0)[0][0]
-                yawn_index = int(yawn_pred > YAWN_THRESHOLD)
-                yawn_label = yawn_class_names[yawn_index]
-
-                cv2.rectangle(img, (x, y + mouth_y_start), (x + w, y + h), (255, 0, 255), 2)
-
-            # --- Drowsiness decision ---
-            if self.closed_eye_counter >= EYE_CLOSED_THRESHOLD or yawn_label == "Yawn":
+            if is_drowsy_now:
+                if self.drowsy_start_time is None:
+                    self.drowsy_start_time = time.time()
+                elif time.time() - self.drowsy_start_time >= 5:
+                    self.is_drowsy_long = True
                 status_text = "DROWSY ALERT!"
                 status_color = (0, 0, 255)
             else:
+                self.drowsy_start_time = None
+                self.is_drowsy_long = False
                 status_text = f"Alert | Eyes: {eye_label} | Mouth: {yawn_label}"
                 status_color = (0, 255, 0)
 
-            break  # only process first face
+            break
 
         cv2.putText(img, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
         cv2.putText(img, f"Closed Eye Frames: {self.closed_eye_counter}", (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # =========================================================
 # STREAMLIT UI
 # =========================================================
-webrtc_streamer(
+webrtc_ctx = webrtc_streamer(
     key="drowsiness-detection",
     video_processor_factory=DrowsinessProcessor,
     rtc_configuration=RTC_CONFIGURATION,
-    media_stream_constraints={"video": True, "audio": False},
+    media_stream_constraints={
+        "video": {"width": {"ideal": 480}, "height": {"ideal": 360}},
+        "audio": False
+    },
 )
 
 st.markdown("---")
