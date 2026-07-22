@@ -24,7 +24,7 @@ eye_class_names = ["Closed_Eyes", "Open_Eyes"]
 yawn_class_names = ["No_yawn", "Yawn"]
 
 # =========================================================
-# LOAD MODELS (cached so it only loads once)
+# LOAD MODELS
 # =========================================================
 @st.cache_resource
 def load_models():
@@ -42,7 +42,7 @@ if face_cascade.empty() or eye_cascade.empty():
     st.stop()
 
 # =========================================================
-# PREPROCESS IMAGE (matches your local script exactly)
+# PREPROCESS IMAGE
 # =========================================================
 def preprocess_image(image):
     image = cv2.resize(image, IMG_SIZE, interpolation=cv2.INTER_AREA)
@@ -65,7 +65,6 @@ class DrowsinessProcessor(VideoProcessorBase):
         self.last_yawn_label = "Unknown"
         self.drowsy_start_time = None
         self.is_drowsy_long = False
-        
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -136,6 +135,9 @@ class DrowsinessProcessor(VideoProcessorBase):
 # =========================================================
 # STREAMLIT UI
 # =========================================================
+st.markdown("---")
+st.markdown("**Note:** Grant camera access when prompted. Detection runs entirely in-browser via WebRTC.")
+
 webrtc_ctx = webrtc_streamer(
     key="drowsiness-detection",
     video_processor_factory=DrowsinessProcessor,
@@ -146,5 +148,28 @@ webrtc_ctx = webrtc_streamer(
     },
 )
 
-st.markdown("---")
-st.markdown("**Note:** Grant camera access when prompted. Detection runs entirely in-browser via WebRTC.")
+# =========================================================
+# SOUND ALERT (plays once per drowsy episode ≥5s)
+# =========================================================
+alert_placeholder = st.empty()
+
+if webrtc_ctx.state.playing:
+    while True:
+        if webrtc_ctx.video_processor:
+
+            if webrtc_ctx.video_processor.is_drowsy_long:
+
+                # Keep alarm playing continuously
+                alert_placeholder.markdown(
+                    """
+                    <audio autoplay loop>
+                        <source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+                                type="audio/ogg">
+                    </audio>
+                    """,
+                    unsafe_allow_html=True
+                )
+            else:
+                alert_placeholder.empty()
+
+        time.sleep(0.1)
